@@ -558,200 +558,219 @@ def parse_voice():
             
             return target_date
         
-        # 构建系统提示词
-        system_prompt = f"""你是一个智能记账助手，专门帮助用户从语音中提取记账信息。
+        # 构建系统提示词 - 优化版
+        system_prompt = f"""你是一个专业的智能记账助手,专门从语音中精确提取记账信息。
 
-任务：
-1. 仔细听取用户的语音内容
-2. 识别并提取所有记账相关信息
-3. 对每条记账信息提取：金额（数字）、标题（简短描述）、分类、日期时间
-4. 如果语音中包含多条记账信息，请全部提取{category_text}
-5. **重要**：如果语音中提到日期或时间（如"今天"、"昨天"、"明天"、"上午"、"下午"、"晚上"、"几点"等），必须识别并提取
+**核心任务**:
+1. 仔细分析语音内容,识别所有消费记录
+2. 准确提取每条记录的: 金额、消费项目、分类、时间
+3. 即使语音表达不完整,也要尽力推断合理信息
+4. 支持多条记账信息的批量提取{category_text}
 
-输出格式要求：
-- 必须返回有效的JSON数组格式
-- 每个对象包含：amount（金额，纯数字）、title（标题）、category（分类）、date（日期时间）
-- 如果没有提到具体金额，尝试根据常识推断合理金额
-- 如果分类不明确，根据内容智能归类
-- **日期时间识别规则**（必须严格按照以下规则识别，**重要：date字段请返回相对日期描述，如"昨天"、"今天"、"明天"等，而不是绝对日期**）：
-  - "今天"、"今日"、"今" → 当前日期，保持当前时间或语音中提到的时间
-  - "昨天"、"昨日"、"昨" → 当前日期减1天
-  - "明天"、"明日"、"明" → 当前日期加1天
-  - "前天"、"前日" → 当前日期减2天
-  - "后天"、"后日" → 当前日期加2天
-  - "大后天"、"大后日" → 当前日期加3天
-  - "大前天"、"大前日" → 当前日期减3天
-  - "上周"、"上星期" → 当前日期减7天
-  - "下周"、"下星期" → 当前日期加7天
-  - "上周X"（如"上周一"）→ 计算最近的上周一日期
-  - "下周X"（如"下周一"）→ 计算最近的下周一日期
-  - "上午"、"早上"、"早晨"、"早" → 设置为当天的 09:00
-  - "中午"、"午间"、"正午" → 设置为当天的 12:00
-  - "下午"、"午后" → 设置为当天的 15:00
-  - "晚上"、"傍晚"、"晚" → 设置为当天的 19:00
-  - "夜里"、"深夜"、"半夜" → 设置为当天的 22:00
-  - 如果提到具体时间（如"3点"、"15:30"、"下午3点"、"晚上8点"），使用该时间
-  - 如果提到"X月X日"、"X号"等具体日期，使用该日期
-  - 如果未提及日期，使用当前日期和时间
-  - **重要**：日期和时间必须同时识别，如果只提到日期，时间使用当前时间；如果只提到时间，日期使用当前日期
+**金额识别规则**:
+- 优先使用语音中明确提到的金额
+- 数字表达: "三十五"→35, "五十块"→50, "一百五"→150
+- 如未明确金额但有消费项目,根据常识推断合理价格
+- 金额必须是正数
 
-示例输出：
-[
-  {{"amount": 35, "title": "午餐", "category": "餐饮", "date": "今天 中午"}},
-  {{"amount": 50, "title": "打车去公司", "category": "交通", "date": "昨天 上午"}},
-  {{"amount": 100, "title": "晚餐", "category": "餐饮", "date": "明天 晚上"}}
+**分类识别规则**:
+- 餐饮: 早餐/午餐/晚餐/下午茶/咖啡/奶茶/外卖等
+- 交通: 打车/地铁/公交/停车/加油等
+- 购物: 买衣服/买鞋/买包/网购/超市等
+- 娱乐: 看电影/KTV/游戏/运动等
+- 日用: 日用品/生活用品/洗漱用品等
+- 其他: 无法明确分类的支出
+
+**日期时间识别** (**重要**):
+- 必须识别语音中的时间表达
+- 相对时间: "今天"、"昨天"、"明天"、"前天"、"后天"等
+- 时段表达: "早上"→9:00, "中午"→12:00, "下午"→15:00, "晚上"→19:00
+- 具体时间: "3点"、"15:30"、"下午3点"等
+- 日期表达: "1月14日"、"14号"等
+- **返回格式**: date字段使用相对描述(如"昨天 下午"、"今天 中午"),服务器会自动转换
+- 如果未提及时间,使用"今天"
+
+**输出格式要求**:
+严格返回JSON数组,每个对象包含:
+{{
+  "amount": 数字(必需),
+  "title": "简短描述(必需)",
+  "category": "分类(必需)",
+  "date": "相对日期描述(必需)"
+}}
+
+**示例**:
+语音: "昨天中午吃了35块的午饭,下午打车花了50"
+输出: [
+  {{"amount": 35, "title": "午饭", "category": "餐饮", "date": "昨天 中午"}},
+  {{"amount": 50, "title": "打车", "category": "交通", "date": "昨天 下午"}}
 ]
 
-**重要提示**：
-- date字段请使用相对日期描述（如"昨天"、"今天"、"明天"、"前天"、"后天"等），而不是绝对日期
-- 如果提到具体时间，可以加上时间描述（如"昨天 下午"、"今天 3点"等）
-- 服务器会自动将相对日期转换为实际日期"""
+**重要**:
+- 必须返回有效JSON数组
+- 每条记录必须包含所有4个字段
+- 金额必须是数字类型,不能是字符串
+- date使用相对描述,不要用绝对日期"""
 
-        # 调用阿里云语音识别API
-        try:
-            completion = dashscope_client.chat.completions.create(
-                model="qwen-omni-turbo",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_audio",
-                                "input_audio": {
-                                    "data": audio_url,
-                                    "format": "wav",
-                                },
-                            },
-                            {"type": "text", "text": "请分析这段语音中的记账信息，并按要求返回JSON格式的记账条目。"},
-                        ],
-                    },
-                ],
-                # 只需要文本输出
-                modalities=["text"],
-                stream=False,
-                temperature=0.3,  # 降低温度以提高输出的确定性
-            )
+        # 调用阿里云语音识别API (带重试机制)
+        max_retries = 2
+        retry_count = 0
+        last_error = None
 
-            # 获取AI返回的内容
-            ai_response = completion.choices[0].message.content
-
-            # 尝试解析JSON
+        while retry_count <= max_retries:
             try:
-                # 清理可能的markdown代码块标记
-                if '```json' in ai_response:
-                    ai_response = ai_response.split('```json')[1].split('```')[0].strip()
-                elif '```' in ai_response:
-                    ai_response = ai_response.split('```')[1].split('```')[0].strip()
+                completion = dashscope_client.chat.completions.create(
+                    model="qwen-audio-turbo",  # 使用最新的多模态模型
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": system_prompt
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_audio",
+                                    "input_audio": {
+                                        "data": audio_url,
+                                        "format": "m4a",  # 修正格式为实际的m4a
+                                    },
+                                },
+                                {"type": "text", "text": "请分析这段语音中的记账信息。注意:1)准确识别金额数字 2)理解消费场景 3)准确提取时间信息。返回JSON格式的记账条目。"},
+                            ],
+                        },
+                    ],
+                    # 只需要文本输出
+                    modalities=["text"],
+                    stream=False,
+                    temperature=0.1,  # 降低温度以提高准确性和一致性
+                    top_p=0.8,        # 降低top_p以提高确定性
+                )
 
-                parsed_items = json.loads(ai_response)
+                # 获取AI返回的内容
+                ai_response = completion.choices[0].message.content
+                break  # 成功则跳出重试循环
 
-                # 确保返回的是数组
-                if not isinstance(parsed_items, list):
-                    parsed_items = [parsed_items]
+            except Exception as api_error:
+                last_error = api_error
+                retry_count += 1
+                if retry_count <= max_retries:
+                    print(f"API调用失败,正在重试 ({retry_count}/{max_retries}): {str(api_error)}")
+                    import time
+                    time.sleep(1)  # 等待1秒后重试
+                else:
+                    return jsonify({
+                        'status': 'error',
+                        'message': f'AI服务调用失败(已重试{max_retries}次): {str(last_error)}'
+                    }), 500
 
-                # 验证和清理数据
-                cleaned_items = []
-                from datetime import datetime
-                current_time = datetime.now()
-                
-                for item in parsed_items:
-                    if isinstance(item, dict):
-                        # 处理日期字段
-                        date_value = current_time  # 默认使用当前时间
-                        if 'date' in item:
-                            try:
-                                # 尝试解析 ISO8601 格式的日期
-                                date_str = item.get('date')
-                                if isinstance(date_str, str):
-                                    # 解析顺序：
-                                    # 1. 首先尝试解析中文相对日期描述（如"昨天"、"前天"等）
-                                    # 2. 然后尝试解析中文日期格式（如"2024年1月14日"、"1月15日"等）
-                                    # 3. 最后尝试解析标准日期格式（ISO8601等）
-                                    
-                                    relative_date = parse_relative_date(date_str, current_time)
-                                    if relative_date:
-                                        date_value = relative_date
+        # 尝试解析JSON
+        try:
+            # 清理可能的markdown代码块标记
+            if '```json' in ai_response:
+                ai_response = ai_response.split('```json')[1].split('```')[0].strip()
+            elif '```' in ai_response:
+                ai_response = ai_response.split('```')[1].split('```')[0].strip()
+
+            parsed_items = json.loads(ai_response)
+
+            # 确保返回的是数组
+            if not isinstance(parsed_items, list):
+                parsed_items = [parsed_items]
+
+            # 验证和清理数据
+            cleaned_items = []
+            from datetime import datetime
+            current_time = datetime.now()
+
+            for item in parsed_items:
+                if isinstance(item, dict):
+                    # 处理日期字段
+                    date_value = current_time  # 默认使用当前时间
+                    if 'date' in item:
+                        try:
+                            # 尝试解析 ISO8601 格式的日期
+                            date_str = item.get('date')
+                            if isinstance(date_str, str):
+                                # 解析顺序：
+                                # 1. 首先尝试解析中文相对日期描述（如"昨天"、"前天"等）
+                                # 2. 然后尝试解析中文日期格式（如"2024年1月14日"、"1月15日"等）
+                                # 3. 最后尝试解析标准日期格式（ISO8601等）
+
+                                relative_date = parse_relative_date(date_str, current_time)
+                                if relative_date:
+                                    date_value = relative_date
+                                else:
+                                    # 尝试解析中文日期格式
+                                    chinese_date = parse_chinese_date(date_str, current_time)
+                                    if chinese_date:
+                                        date_value = chinese_date
                                     else:
-                                        # 尝试解析中文日期格式
-                                        chinese_date = parse_chinese_date(date_str, current_time)
-                                        if chinese_date:
-                                            date_value = chinese_date
-                                        else:
-                                            # 尝试多种标准日期格式
-                                            date_formats = [
-                                                '%Y-%m-%dT%H:%M:%S',
-                                                '%Y-%m-%dT%H:%M:%S.%f',
-                                                '%Y-%m-%d %H:%M:%S',
-                                                '%Y-%m-%d %H:%M:%S.%f',
-                                                '%Y-%m-%d',
-                                                '%Y/%m/%d %H:%M:%S',
-                                                '%Y/%m/%d',
-                                                '%m/%d/%Y %H:%M:%S',
-                                                '%m/%d/%Y',
-                                                '%d/%m/%Y %H:%M:%S',
-                                                '%d/%m/%Y',
-                                            ]
-                                            parsed = False
-                                            for fmt in date_formats:
-                                                try:
-                                                    date_value = datetime.strptime(date_str, fmt)
-                                                    parsed = True
-                                                    break
-                                                except ValueError:
-                                                    continue
-                                            if not parsed:
-                                                # 如果解析失败，使用当前时间
-                                                date_value = current_time
-                                elif isinstance(date_str, (int, float)):
-                                    # 如果是时间戳
-                                    date_value = datetime.fromtimestamp(date_str)
-                            except Exception as e:
-                                # 解析失败，使用当前时间
-                                print(f"日期解析错误: {e}, 原始值: {date_str}")
-                                date_value = current_time
-                        
-                        cleaned_item = {
-                            'amount': float(item.get('amount', 0)),
-                            'title': str(item.get('title', '未命名支出')),
-                            'category': str(item.get('category', '其他')),
-                            'date': date_value.isoformat()  # 转换为 ISO8601 格式字符串
-                        }
-                        cleaned_items.append(cleaned_item)
-                
-                # 确保所有条目都有日期字段（如果没有，使用当前时间）
-                for item in cleaned_items:
-                    if 'date' not in item:
-                        item['date'] = current_time.isoformat()
+                                        # 尝试多种标准日期格式
+                                        date_formats = [
+                                            '%Y-%m-%dT%H:%M:%S',
+                                            '%Y-%m-%dT%H:%M:%S.%f',
+                                            '%Y-%m-%d %H:%M:%S',
+                                            '%Y-%m-%d %H:%M:%S.%f',
+                                            '%Y-%m-%d',
+                                            '%Y/%m/%d %H:%M:%S',
+                                            '%Y/%m/%d',
+                                            '%m/%d/%Y %H:%M:%S',
+                                            '%m/%d/%Y',
+                                            '%d/%m/%Y %H:%M:%S',
+                                            '%d/%m/%Y',
+                                        ]
+                                        parsed = False
+                                        for fmt in date_formats:
+                                            try:
+                                                date_value = datetime.strptime(date_str, fmt)
+                                                parsed = True
+                                                break
+                                            except ValueError:
+                                                continue
+                                        if not parsed:
+                                            # 如果解析失败，使用当前时间
+                                            date_value = current_time
+                            elif isinstance(date_str, (int, float)):
+                                # 如果是时间戳
+                                date_value = datetime.fromtimestamp(date_str)
+                        except Exception as e:
+                            # 解析失败，使用当前时间
+                            print(f"日期解析错误: {e}, 原始值: {date_str}")
+                            date_value = current_time
 
-                return jsonify({
-                    'status': 'success',
-                    'message': '语音解析成功',
-                    'data': cleaned_items,
-                    'raw_response': ai_response  # 可选：返回原始响应用于调试
-                }), 200
+                    cleaned_item = {
+                        'amount': float(item.get('amount', 0)),
+                        'title': str(item.get('title', '未命名支出')),
+                        'category': str(item.get('category', '其他')),
+                        'date': date_value.isoformat()  # 转换为 ISO8601 格式字符串
+                    }
+                    cleaned_items.append(cleaned_item)
 
-            except json.JSONDecodeError as e:
-                # 如果解析失败，尝试提取关键信息
-                return jsonify({
-                    'status': 'partial_success',
-                    'message': '语音识别成功，但数据格式需要调整',
-                    'data': [{
-                        'amount': 0,
-                        'title': '请手动编辑',
-                        'category': '其他'
-                    }],
-                    'raw_response': ai_response
-                }), 200
+            # 确保所有条目都有日期字段（如果没有，使用当前时间）
+            for item in cleaned_items:
+                if 'date' not in item:
+                    item['date'] = current_time.isoformat()
 
-        except Exception as api_error:
             return jsonify({
-                'status': 'error',
-                'message': f'AI服务调用失败: {str(api_error)}'
-            }), 500
+                'status': 'success',
+                'message': '语音解析成功',
+                'data': cleaned_items,
+                'raw_response': ai_response  # 可选：返回原始响应用于调试
+            }), 200
+
+        except json.JSONDecodeError as e:
+            # 如果解析失败，尝试提取关键信息
+            return jsonify({
+                'status': 'partial_success',
+                'message': '语音识别成功，但数据格式需要调整',
+                'data': [{
+                    'amount': 0,
+                    'title': '请手动编辑',
+                    'category': '其他'
+                }],
+                'raw_response': ai_response
+            }), 200
 
     except Exception as e:
         return jsonify({
