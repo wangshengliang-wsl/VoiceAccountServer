@@ -10,11 +10,13 @@ import uuid
 import json
 from datetime import datetime
 from pathlib import Path
+from functools import wraps
 from flask import Flask, jsonify, request
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from werkzeug.utils import secure_filename
 from openai import OpenAI
+import jwt
 
 # 获取项目根目录(app.py 所在的目录)
 BASE_DIR = Path(__file__).resolve().parent
@@ -776,6 +778,362 @@ def parse_voice():
         return jsonify({
             'status': 'error',
             'message': f'语音解析失败: {str(e)}'
+        }), 500
+
+
+# ==========================================
+# JWT Authentication Middleware
+# ==========================================
+
+def require_auth(f):
+    """
+    装饰器: 验证 JWT token 并提取用户 ID
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # 从请求头获取 Authorization token
+        auth_header = request.headers.get('Authorization')
+
+        if not auth_header:
+            return jsonify({
+                'status': 'error',
+                'message': '缺少认证令牌'
+            }), 401
+
+        # 解析 Bearer token
+        try:
+            parts = auth_header.split()
+            if parts[0].lower() != 'bearer' or len(parts) != 2:
+                return jsonify({
+                    'status': 'error',
+                    'message': '无效的认证令牌格式'
+                }), 401
+
+            token = parts[1]
+
+            # 使用 Supabase 验证 JWT
+            try:
+                user_response = supabase.auth.get_user(token)
+                user = user_response.user
+
+                if not user:
+                    return jsonify({
+                        'status': 'error',
+                        'message': '无效的认证令牌'
+                    }), 401
+
+                # 将用户 ID 添加到 request 对象中
+                request.user_id = str(user.id)
+                request.user_email = user.email
+
+            except Exception as e:
+                return jsonify({
+                    'status': 'error',
+                    'message': f'令牌验证失败: {str(e)}'
+                }), 401
+
+        except Exception as e:
+            return jsonify({
+                'status': 'error',
+                'message': f'认证错误: {str(e)}'
+            }), 401
+
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+# ==========================================
+# Sync Endpoints
+# ==========================================
+
+@app.route('/api/expenses/sync', methods=['POST'])
+@require_auth
+def sync_expenses():
+    """
+    批量上传/同步记账数据到云端
+
+    请求体:
+    {
+        "expenses": [
+            {
+                "id": "uuid",
+                "user_id": "uuid",
+                "amount": 100.50,
+                "title": "午餐",
+                "category": "餐饮",
+                "expense_date": "2025-01-14T12:00:00Z",
+                "notes": "备注",
+                "created_at": "2025-01-14T12:00:00Z",
+                "updated_at": "2025-01-14T12:00:00Z"
+            }
+        ]
+    }
+
+    返回:
+    {
+        "status": "success",
+        "uploaded_count": 10,
+        "conflicts": []
+    }
+    """
+    try:
+        data = request.json
+        if not data or 'expenses' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': '请求数据格式错误'
+            }), 400
+
+        expenses = data['expenses']
+        user_id = request.user_id
+
+        uploaded_count = 0
+        conflicts = []
+
+        for expense_data in expenses:
+            try:
+                # 验证必需字段
+                required_fields = ['id', 'amount', 'title', 'category', 'expense_date']
+                if not all(field in expense_data for field in required_fields):
+                    continue
+
+                # 确保 user_id 匹配当前认证用户
+                expense_data['user_id'] = user_id
+
+                # 检查记录是否已存在
+                existing = supabase.table('expenses').select('*').eq('id', expense_data['id']).execute()
+
+                if existing.data and len(existing.data) > 0:
+                    # 记录已存在，比较 updated_at 时间戳
+                    existing_expense = existing.data[0]
+                    existing_updated_at = datetime.fromisoformat(existing_expense['updated_at'].replace('Z', '+00:00'))
+                    new_updated_at = datetime.fromisoformat(expense_data['updated_at'].replace('Z', '+00:00'))
+
+                    if new_updated_at > existing_updated_at:
+                        # 本地版本更新，更新云端
+                        supabase.table('expenses').update(expense_data).eq('id', expense_data['id']).execute()
+                        uploaded_count += 1
+                    else:
+                        # 云端版本更新或相同，记录冲突
+                        conflicts.append({
+                            'id': expense_data['id'],
+                            'cloud_updated_at': existing_expense['updated_at'],
+                            'local_updated_at': expense_data['updated_at']
+                        })
+                else:
+                    # 新记录，插入
+                    supabase.table('expenses').insert(expense_data).execute()
+                    uploaded_count += 1
+
+            except Exception as e:
+                print(f"Error syncing expense {expense_data.get('id')}: {str(e)}")
+                continue
+
+        return jsonify({
+            'status': 'success',
+            'message': f'成功同步 {uploaded_count} 条记录',
+            'uploaded_count': uploaded_count,
+            'conflicts': conflicts
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'同步失败: {str(e)}'
+        }), 500
+
+
+@app.route('/api/expenses/fetch', methods=['GET'])
+@require_auth
+def fetch_expenses():
+    """
+    从云端拉取记账数据
+
+    查询参数:
+    - since: ISO8601 时间戳 (可选，仅获取此时间后的更新)
+
+    返回:
+    {
+        "status": "success",
+        "expenses": [...],
+        "server_time": "2025-01-14T12:00:00Z"
+    }
+    """
+    try:
+        user_id = request.user_id
+        since = request.args.get('since')
+
+        # 构建查询
+        query = supabase.table('expenses').select('*').eq('user_id', user_id)
+
+        # 如果提供了 since 参数，只获取该时间之后的记录
+        if since:
+            query = query.gte('updated_at', since)
+
+        # 按更新时间排序
+        query = query.order('updated_at', desc=True)
+
+        # 执行查询
+        result = query.execute()
+
+        return jsonify({
+            'status': 'success',
+            'expenses': result.data,
+            'server_time': datetime.utcnow().isoformat() + 'Z',
+            'count': len(result.data)
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'获取数据失败: {str(e)}'
+        }), 500
+
+
+@app.route('/api/expenses/<expense_id>', methods=['PUT'])
+@require_auth
+def update_expense(expense_id):
+    """
+    更新单条记账记录
+
+    请求体: { expense 数据 }
+    """
+    try:
+        user_id = request.user_id
+        data = request.json
+
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': '请求数据为空'
+            }), 400
+
+        # 确保 user_id 匹配
+        data['user_id'] = user_id
+
+        # 更新记录 (RLS 会自动确保只能更新自己的记录)
+        result = supabase.table('expenses').update(data).eq('id', expense_id).eq('user_id', user_id).execute()
+
+        if not result.data:
+            return jsonify({
+                'status': 'error',
+                'message': '记录不存在或无权限'
+            }), 404
+
+        return jsonify({
+            'status': 'success',
+            'message': '更新成功',
+            'expense': result.data[0]
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'更新失败: {str(e)}'
+        }), 500
+
+
+@app.route('/api/expenses/<expense_id>', methods=['DELETE'])
+@require_auth
+def delete_expense(expense_id):
+    """
+    删除单条记账记录
+    """
+    try:
+        user_id = request.user_id
+
+        # 删除记录 (RLS 会自动确保只能删除自己的记录)
+        result = supabase.table('expenses').delete().eq('id', expense_id).eq('user_id', user_id).execute()
+
+        return jsonify({
+            'status': 'success',
+            'message': '删除成功'
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'删除失败: {str(e)}'
+        }), 500
+
+
+@app.route('/api/settings', methods=['GET'])
+@require_auth
+def get_settings():
+    """
+    获取用户设置
+    """
+    try:
+        user_id = request.user_id
+
+        # 查询用户设置
+        result = supabase.table('user_settings').select('*').eq('user_id', user_id).execute()
+
+        if result.data and len(result.data) > 0:
+            settings = result.data[0]
+        else:
+            # 如果不存在，创建默认设置
+            default_settings = {
+                'user_id': user_id,
+                'categories': [],
+                'currency': 'CNY',
+                'theme': 'system'
+            }
+            result = supabase.table('user_settings').insert(default_settings).execute()
+            settings = result.data[0]
+
+        return jsonify({
+            'status': 'success',
+            'settings': settings
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'获取设置失败: {str(e)}'
+        }), 500
+
+
+@app.route('/api/settings', methods=['POST'])
+@require_auth
+def update_settings():
+    """
+    更新用户设置
+
+    请求体:
+    {
+        "categories": [...],
+        "currency": "CNY",
+        "theme": "dark"
+    }
+    """
+    try:
+        user_id = request.user_id
+        data = request.json
+
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': '请求数据为空'
+            }), 400
+
+        # 确保 user_id
+        data['user_id'] = user_id
+
+        # 尝试更新，如果不存在则插入
+        result = supabase.table('user_settings').upsert(data).eq('user_id', user_id).execute()
+
+        return jsonify({
+            'status': 'success',
+            'message': '设置更新成功',
+            'settings': result.data[0] if result.data else data
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'更新设置失败: {str(e)}'
         }), 500
 
 
